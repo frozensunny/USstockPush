@@ -1,24 +1,123 @@
 # -*- coding: utf-8 -*-
 """
 美股拆股、分红数据抓取模块
-使用 yfinance 获取免费数据
+支持全量 NASDAQ + NYSE 股票监控
 """
 
 import yfinance as yf
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from typing import List, Dict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
+import requests
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# 股票列表缓存
+_stock_list_cache = None
 
-def get_upcoming_splits_and_dividends(days_ahead: int = 7) -> Dict:
+
+def get_us_stock_list() -> List[str]:
+    """
+    获取所有 NASDAQ + NYSE 股票代码列表
+    数据来源: rreichel3/US-Stock-Symbols (GitHub)
+    """
+    global _stock_list_cache
+    
+    if _stock_list_cache is not None:
+        return _stock_list_cache
+    
+    tickers = set()
+    
+    # 从 GitHub 获取 NASDAQ 股票列表
+    try:
+        nasdaq_url = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/nasdaq_full_ticker.json"
+        resp = requests.get(nasdaq_url, timeout=30)
+        if resp.status_code == 200:
+            data = resp.json()
+            for item in data:
+                if item.get('symbol'):
+                    tickers.add(item['symbol'].strip().upper())
+            logger.info(f"获取到 {len(data)} 只 NASDAQ 股票")
+    except Exception as e:
+        logger.warning(f"获取 NASDAQ 列表失败: {e}")
+    
+    # 从 GitHub 获取 NYSE 股票列表
+    try:
+        nyse_url = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/nyse_full_ticker.json"
+        resp = requests.get(nyse_url, timeout=30)
+        if resp.status_code == 200:
+            data = resp.json()
+            for item in data:
+                if item.get('symbol'):
+                    tickers.add(item['symbol'].strip().upper())
+            logger.info(f"获取到 {len(data)} 只 NYSE 股票")
+    except Exception as e:
+        logger.warning(f"获取 NYSE 列表失败: {e}")
+    
+    # 过滤掉非法字符
+    valid_tickers = []
+    for t in tickers:
+        if t and t.isalpha() or (t.isalnum() and not t.endswith('-')):
+            valid_tickers.append(t)
+    
+    _stock_list_cache = sorted(valid_tickers)
+    logger.info(f"共获取 {len(_stock_list_cache)} 只美股")
+    return _stock_list_cache
+
+
+def check_ticker_events(ticker_symbol: str, start_date: datetime, end_date: datetime) -> Dict:
+    """
+    检查单只股票是否有拆股或分红事件
+    """
+    result = {
+        'symbol': ticker_symbol,
+        'split': None,
+        'dividend': None,
+        'error': None
+    }
+    
+    try:
+        ticker = yf.Ticker(ticker_symbol)
+        
+        # 获取股票名称
+        try:
+            info = ticker.info
+            result['name'] = info.get('shortName', info.get('longName', ticker_symbol))
+        except:
+            result['name'] = ticker_symbol
+        
+        # 获取分红
+        dividends = ticker.dividends
+        if not dividends.empty:
+            # 筛选日期范围内的分红
+            mask = (dividends.index >= start_date) & (dividends.index <= end_date)
+            recent = dividends[mask]
+            if not recent.empty:
+                latest = recent.iloc[-1]
+                result['dividend'] = {
+                    'amount': float(latest),
+                    'date': latest.name.strftime('%Y-%m-%d')
+                }
+        
+        # 获取拆股 - 通过 info 获取最近的拆股
+        # 注意: yfinance 不直接提供未来拆股预告，这里获取历史记录
+        # 实际使用时需结合其他数据源获取预告
+        
+    except Exception as e:
+        result['error'] = str(e)
+    
+    return result
+
+
+def get_upcoming_events(days_ahead: int = 7, max_workers: int = 50) -> Dict:
     """
     获取未来一段时间的拆股和分红事件
     
     Args:
         days_ahead: 向前查看的天数
+        max_workers: 并行线程数
     
     Returns:
         包含splits和dividends的字典
@@ -28,148 +127,94 @@ def get_upcoming_splits_and_dividends(days_ahead: int = 7) -> Dict:
         "dividends": []
     }
     
-    # 使用主要指数成分股作为监控范围
-    tickers = get_major_us_tickers()
-    
+    start_date = datetime.now()
     end_date = datetime.now() + timedelta(days=days_ahead)
     
-    for ticker_symbol in tickers:
-        try:
-            ticker = yf.Ticker(ticker_symbol)
-            info = ticker.info
-            
-            # 获取拆股信息
-            if info.get('stockSplitHistory') or info.get('lastStockSplit'):
-                # 获取历史拆股记录（最近几年的）
-                pass
-            
-            # 从info中获取
-            last_split = info.get('lastStockSplit', {})
-            if last_split:
-                split_date = last_split.get('date', '')
-                if split_date:
-                    split_date_dt = datetime.strptime(split_date, '%Y-%m-%d')
-                    if split_date_dt <= end_date and split_date_dt >= datetime.now():
-                        result["splits"].append({
-                            'symbol': ticker_symbol,
-                            'name': info.get('shortName', ticker_symbol),
-                            'ratio': last_split.get('ratio', 'N/A'),
-                            'date': split_date
-                        })
-            
-            # 获取分红信息
-            dividends = ticker.dividends
-            if not dividends.empty:
-                # 获取最近的分红
-                recent_div = dividends.iloc[-1]
-                div_date = recent_div.name
-                if isinstance(div_date, datetime):
-                    div_date_str = div_date.strftime('%Y-%m-%d')
-                    if div_date <= end_date and div_date >= datetime.now():
-                        result["dividends"].append({
-                            'symbol': ticker_symbol,
-                            'name': info.get('shortName', ticker_symbol),
-                            'amount': float(recent_div),
-                            'date': div_date_str,
-                            'yield': info.get('dividendYield', 0)
-                        })
-                        
-        except Exception as e:
-            logger.debug(f"Error fetching {ticker_symbol}: {e}")
-            continue
+    # 获取股票列表
+    tickers = get_us_stock_list()
+    logger.info(f"开始检查 {len(tickers)} 只股票...")
     
+    # 并行检查
+    completed = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(check_ticker_events, t, start_date, end_date): t 
+            for t in tickers
+        }
+        
+        for future in as_completed(futures):
+            completed += 1
+            if completed % 500 == 0:
+                logger.info(f"进度: {completed}/{len(tickers)}")
+            
+            try:
+                events = future.result()
+                
+                # 处理分红
+                if events.get('dividend'):
+                    result["dividends"].append({
+                        'symbol': events['symbol'],
+                        'name': events.get('name', events['symbol']),
+                        'amount': events['dividend']['amount'],
+                        'date': events['dividend']['date'],
+                        'yield': 0  # 简化处理
+                    })
+                
+                # 处理拆股 (如果有)
+                # 注意: yfinance 的 stockSplitHistory 需要特殊处理
+                
+            except Exception as e:
+                continue
+    
+    logger.info(f"查询完成: 分红 {len(result['dividends'])} 条, 拆股 {len(result['splits'])} 条")
     return result
 
 
+# 以下为精简版 - 只检查主要股票，适合快速测试
 def get_major_us_tickers() -> List[str]:
-    """
-    获取主要美股 ticker 列表
-    这里使用主要指数成分股
-    """
-    # 主要上市公司 - 可按需扩展
-    major_tickers = [
-        # 科技巨头
-        'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'NVDA', 'TSLA', 'NFLX', 'AMD', 'INTC',
-        'ORCL', 'CRM', 'ADBE', 'CSCO', 'IBM', 'QCOM', 'TXN', 'AVGO', 'NOW', 'SNOW',
-        
-        # 金融
-        'JPM', 'BAC', 'WFC', 'GS', 'MS', 'C', 'BLK', 'AXP', 'V', 'MA', 'PYPL', 'SQ',
-        
-        # 消费
+    """主要美股 ticker 列表 (精简版)"""
+    return [
+        'AAPL', 'MSFT', 'GOOGL', 'GOOG', 'AMZN', 'META', 'NVDA', 'TSLA', 'NFLX', 'AMD',
+        'INTC', 'ORCL', 'CRM', 'ADBE', 'CSCO', 'IBM', 'QCOM', 'TXN', 'AVGO', 'NOW',
+        'SNOW', 'UBER', 'LYFT', 'ABNB', 'RBLX', 'PLTR', 'COIN', 'MARA', 'RIOT', 'SQ',
+        'JPM', 'BAC', 'WFC', 'GS', 'MS', 'C', 'BLK', 'AXP', 'V', 'MA', 'PYPL',
         'WMT', 'HD', 'COST', 'TGT', 'LOW', 'NKE', 'SBUX', 'MCD', 'DIS', 'CMCSA',
-        
-        # 医疗
         'UNH', 'JNJ', 'PFE', 'ABBV', 'MRK', 'LLY', 'TMO', 'ABT', 'AMGN', 'GILD',
-        
-        # 能源
         'XOM', 'CVX', 'COP', 'SLB', 'EOG', 'MPC', 'VLO',
-        
-        # 工业
         'BA', 'CAT', 'GE', 'HON', 'UPS', 'FDX', 'LMT', 'RTX',
-        
-        # 通信
         'T', 'VZ', 'TMUS',
-        
-        # 房地产
         'AMT', 'PLD', 'CCI', 'EQIX',
-        
-        # 公用事业
         'NEE', 'DUK', 'SO', 'D',
-        
-        # 更多科技
-        'UBER', 'LYFT', 'ABNB', 'RBLX', 'PLTR', 'COIN', 'MARA', 'RIOT',
     ]
-    return major_tickers
 
 
-def check_ticker_events(ticker_symbol: str, target_date: str = None) -> Dict:
+def quick_check(tickers: List[str] = None, days: int = 7) -> Dict:
     """
-    检查特定股票是否有拆股或分红事件
-    
-    Args:
-        ticker_symbol: 股票代码
-        target_date: 目标日期 (YYYY-MM-DD), 默认为今天
-    
-    Returns:
-        事件信息字典
+    快速检查 - 使用精简列表
     """
-    if target_date is None:
-        target_date = datetime.now().strftime('%Y-%m-%d')
+    if tickers is None:
+        tickers = get_major_us_tickers()
     
-    events = {
-        'symbol': ticker_symbol,
-        'split': None,
-        'dividend': None
-    }
+    start_date = datetime.now()
+    end_date = datetime.now() + timedelta(days=days)
     
-    try:
-        ticker = yf.Ticker(ticker_symbol)
-        info = ticker.info
-        
-        # 检查拆股
-        if info.get('lastStockSplit'):
-            split = info['lastStockSplit']
-            if split.get('date') == target_date:
-                events['split'] = {
-                    'ratio': split.get('ratio'),
-                    'date': split.get('date')
-                }
-        
-        # 检查分红
-        dividends = ticker.dividends
-        if not dividends.empty:
-            for date, amount in dividends.items():
-                if date.strftime('%Y-%m-%d') == target_date:
-                    events['dividend'] = {
-                        'amount': float(amount),
-                        'date': date.strftime('%Y-%m-%d')
-                    }
-                    break
-        
-    except Exception as e:
-        logger.error(f"Error checking {ticker_symbol}: {e}")
+    result = {"splits": [], "dividends": []}
     
-    return events
+    for symbol in tickers:
+        try:
+            events = check_ticker_events(symbol, start_date, end_date)
+            if events.get('dividend'):
+                result["dividends"].append({
+                    'symbol': events['symbol'],
+                    'name': events.get('name', events['symbol']),
+                    'amount': events['dividend']['amount'],
+                    'date': events['dividend']['date'],
+                    'yield': 0
+                })
+        except:
+            continue
+    
+    return result
 
 
 def format_events_message(events_data: Dict) -> str:
@@ -177,20 +222,17 @@ def format_events_message(events_data: Dict) -> str:
     格式化事件为飞书消息
     """
     if not events_data:
-        return "📭 暂无今日美股拆股/分红事件"
+        return "📭 暂无美股拆股/分红事件"
     
     messages = []
-    messages.append("📈 **美股今日Corporate Events**\n")
+    messages.append("📈 **美股Corporate Events**\n")
     
     # 分红
     if events_data.get('dividends'):
         messages.append("💰 **分红 (Dividends)**")
         for div in events_data['dividends']:
-            yield_pct = div.get('yield', 0) * 100 if div.get('yield') else 0
             msg = f"- **{div['symbol']}** {div['name']}\n"
             msg += f"  分红: ${div['amount']:.4f}/股 | 日期: {div['date']}"
-            if yield_pct > 0:
-                msg += f" | 股息率: {yield_pct:.2f}%"
             messages.append(msg)
         messages.append("")
     
@@ -204,14 +246,6 @@ def format_events_message(events_data: Dict) -> str:
         messages.append("")
     
     if not events_data.get('dividends') and not events_data.get('splits'):
-        return "📭 暂无今日美股拆股/分红事件"
+        return "📭 暂无美股拆股/分红事件"
     
     return "\n".join(messages)
-
-
-if __name__ == "__main__":
-    # 测试
-    data = get_upcoming_splits_and_dividends(7)
-    print(f"Splits: {len(data['splits'])}")
-    print(f"Dividends: {len(data['dividends'])}")
-    print(format_events_message(data))
