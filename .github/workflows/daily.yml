@@ -30,7 +30,6 @@ jobs:
         run: |
           echo "=== 调试信息 ==="
           echo "Webhook已设置: ${{ secrets.FEISHU_WEBHOOK_URL != '' }}"
-          echo "Webhook前10字符: ${{ substr(secrets.FEISHU_WEBHOOK_URL, 0, 10) }}"
 
       - name: Run notification
         env:
