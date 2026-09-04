@@ -26,10 +26,18 @@ jobs:
         run: |
           pip install yfinance requests
 
+      - name: Debug info
+        run: |
+          echo "=== 调试信息 ==="
+          echo "Webhook已设置: ${{ secrets.FEISHU_WEBHOOK_URL != '' }}"
+          echo "Webhook前10字符: ${{ substr(secrets.FEISHU_WEBHOOK_URL, 0, 10) }}"
+
       - name: Run notification
         env:
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
-        run: python main.py
+        run: |
+          echo "WebHook: $FEISHU_WEBHOOK_URL"
+          python main.py
 
       - name: Success log
         if: success()
