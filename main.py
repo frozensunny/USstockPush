@@ -4,7 +4,7 @@
 """
 
 import config
-from stock_fetcher import get_upcoming_splits_and_dividends, format_events_message
+from stock_fetcher import quick_check, get_us_stock_list, format_events_message
 from feishu_sender import FeishuBot, test_webhook
 
 
@@ -17,9 +17,13 @@ def main():
     # 初始化飞书机器人
     bot = FeishuBot(config.FEISHU_WEBHOOK_URL)
     
-    # 获取数据
-    print(f"正在获取最近 {config.DAYS_LOOKBACK} 天的数据...")
-    events = get_upcoming_splits_and_dividends(config.DAYS_LOOKBACK)
+    # 获取数据 - 先检查全量列表
+    print("获取 NASDAQ + NYSE 股票列表...")
+    all_tickers = get_us_stock_list()
+    print(f"共 {len(all_tickers)} 只股票")
+    
+    print(f"正在查询最近 {config.DAYS_LOOKBACK} 天的事件...")
+    events = quick_check(tickers=all_tickers, days=config.DAYS_LOOKBACK)
     
     splits_count = len(events.get('splits', []))
     dividends_count = len(events.get('dividends', []))
