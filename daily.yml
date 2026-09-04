@@ -1,0 +1,40 @@
+# 美股信息推送 - GitHub Actions 工作流
+
+name: US Stock Daily Push
+
+on:
+  # 每天早上9点(UTC 1点)执行
+  schedule:
+    - cron: '0 1 * * *'
+  # 手动触发
+  workflow_dispatch:
+
+jobs:
+  push-notification:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install yfinance requests
+
+      - name: Run notification
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+        run: python main.py
+
+      - name: Success log
+        if: success()
+        run: echo "推送成功"
+
+      - name: Fail log
+        if: failure()
+        run: echo "推送失败，请检查"
