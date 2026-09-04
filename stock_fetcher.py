@@ -18,6 +18,31 @@ logger = logging.getLogger(__name__)
 _stock_list_cache = None
 
 
+# 备用股票列表 (当无法从网络获取时使用)
+FALLBACK_TICKERS = [
+    # NASDAQ 主要股票
+    'AAPL', 'MSFT', 'GOOGL', 'GOOG', 'AMZN', 'META', 'NVDA', 'TSLA', 'NFLX', 'AMD',
+    'INTC', 'ORCL', 'CRM', 'ADBE', 'CSCO', 'IBM', 'QCOM', 'TXN', 'AVGO', 'NOW',
+    'SNOW', 'UBER', 'LYFT', 'ABNB', 'RBLX', 'PLTR', 'COIN', 'MARA', 'RIOT', 'SQ',
+    'PYPL', 'ZM', 'DOCU', 'TWLO', 'SHOP', 'WDAY', 'OKTA', 'DDOG', 'CRWD', 'NET',
+    'TEAM', 'ATVI', 'BKNG', 'ISRG', 'REGN', 'VRTX', 'ALGN', 'ILMN', 'MRNA', 'LCID',
+    'PENN', 'MGM', 'WYNN', 'LVS', 'MAR', 'HLT', 'EXPE', 'TRIP', 'ABNB', 'DASH',
+    # NYSE 主要股票
+    'JPM', 'BAC', 'WFC', 'GS', 'MS', 'C', 'BLK', 'AXP', 'V', 'MA', 'BRK.B', 'BRK.A',
+    'WMT', 'HD', 'COST', 'TGT', 'LOW', 'NKE', 'SBUX', 'MCD', 'DIS', 'CMCSA',
+    'UNH', 'JNJ', 'PFE', 'ABBV', 'MRK', 'LLY', 'TMO', 'ABT', 'AMGN', 'GILD', 'BMY',
+    'XOM', 'CVX', 'COP', 'SLB', 'EOG', 'MPC', 'VLO', 'PSX', 'OXY',
+    'BA', 'CAT', 'GE', 'HON', 'UPS', 'FDX', 'LMT', 'RTX', 'NOC', 'GD',
+    'T', 'VZ', 'TMUS',
+    'AMT', 'PLD', 'CCI', 'EQIX', 'PSA', 'SPG', 'O', 'WELL',
+    'NEE', 'DUK', 'SO', 'D', 'AEP', 'SRE', 'EXC', 'XEL',
+    'KO', 'PEP', 'MCO', 'SPGI', 'MMC', 'SCHW', 'AXP', 'USB', 'TFC', 'COF',
+    'DE', 'EMR', 'ITW', 'ETN', 'PH', 'ROK', 'CMI', 'AME', 'FTV',
+    'AIG', 'MET', 'PRU', 'AFL', 'TRV', 'CIG', 'LNC', 'MET', 'GL',
+    'MMM', 'GE', 'CAT', 'BA', 'HON', 'UPS', 'UNP',
+    'F', 'GM', 'TM', 'HMC', 'RACE', 'FCAU',
+]
+
 def get_us_stock_list() -> List[str]:
     """
     获取所有 NASDAQ + NYSE 股票代码列表
@@ -56,10 +81,15 @@ def get_us_stock_list() -> List[str]:
     except Exception as e:
         logger.warning(f"获取 NYSE 列表失败: {e}")
     
+    # 如果获取失败，使用备用列表
+    if len(tickers) < 100:
+        logger.warning("使用备用股票列表")
+        tickers = set(FALLBACK_TICKERS)
+    
     # 过滤掉非法字符
     valid_tickers = []
     for t in tickers:
-        if t and t.isalpha() or (t.isalnum() and not t.endswith('-')):
+        if t and (t.isalpha() or t.isalnum()) and not t.endswith('-'):
             valid_tickers.append(t)
     
     _stock_list_cache = sorted(valid_tickers)
@@ -188,31 +218,46 @@ def get_major_us_tickers() -> List[str]:
     ]
 
 
-def quick_check(tickers: List[str] = None, days: int = 7) -> Dict:
+def quick_check(tickers: List[str] = None, days: int = 7, max_tickers: int = 200) -> Dict:
     """
-    快速检查 - 使用精简列表
+    快速检查 - 使用精简列表，只检查最近有分红的股票
     """
     if tickers is None:
         tickers = get_major_us_tickers()
+    
+    # 限制股票数量，避免超时
+    tickers = tickers[:max_tickers]
     
     start_date = datetime.now()
     end_date = datetime.now() + timedelta(days=days)
     
     result = {"splits": [], "dividends": []}
     
-    for symbol in tickers:
+    # 使用多线程加速
+    def check_one(symbol):
         try:
-            events = check_ticker_events(symbol, start_date, end_date)
-            if events.get('dividend'):
-                result["dividends"].append({
-                    'symbol': events['symbol'],
-                    'name': events.get('name', events['symbol']),
-                    'amount': events['dividend']['amount'],
-                    'date': events['dividend']['date'],
-                    'yield': 0
-                })
+            return check_ticker_events(symbol, start_date, end_date)
         except:
-            continue
+            return None
+    
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures = {executor.submit(check_one, t): t for t in tickers}
+        for i, future in enumerate(as_completed(futures)):
+            try:
+                events = future.result()
+                if events and events.get('dividend'):
+                    result["dividends"].append({
+                        'symbol': events['symbol'],
+                        'name': events.get('name', events['symbol']),
+                        'amount': events['dividend']['amount'],
+                        'date': events['dividend']['date'],
+                        'yield': 0
+                    })
+            except:
+                continue
+            # 限制结果数量
+            if len(result["dividends"]) >= 50:
+                break
     
     return result
 
